@@ -1,6 +1,7 @@
 from django.test import TestCase, Client
 from django.urls import reverse
 from django.utils import timezone
+from django.core.cache import cache
 
 from courses.models import (
     User,
@@ -27,6 +28,9 @@ credentials = dict(
 
 class CourseDetailViewTests(TestCase):
     def setUp(self):
+        # Clear cache before each test to ensure fresh state
+        cache.clear()
+
         self.client = Client()
 
         self.user = User.objects.create_user(**credentials)
@@ -313,7 +317,7 @@ class CourseDetailViewTests(TestCase):
             self.enrollment.display_name,
         ]
 
-        actual_order = [e.display_name for e in enrollments]
+        actual_order = [e['display_name'] for e in enrollments]
 
         self.assertEqual(actual_order, expected_order)
 
@@ -349,13 +353,13 @@ class CourseDetailViewTests(TestCase):
             e5.display_name,
         ]
 
-        actual_order = [e.display_name for e in enrollments]
+        actual_order = [e['display_name'] for e in enrollments]
 
         self.assertEqual(actual_order, expected_order)
 
         expected_positions = [1, 2, 3, 4, None, None]
         actual_positions = [
-            e.position_on_leaderboard for e in enrollments
+            e['position_on_leaderboard'] for e in enrollments
         ]
         self.assertEqual(actual_positions, expected_positions)
 
@@ -390,7 +394,7 @@ class CourseDetailViewTests(TestCase):
 
         # Verify the order is correct
         expected_order = ["e1", "e2", "e3", "e4", "e5"]
-        actual_order = [e.display_name for e in enrollments]
+        actual_order = [e['display_name'] for e in enrollments]
         self.assertEqual(actual_order, expected_order)
 
     def test_not_enrolled_but_can_edit_details(self):
@@ -540,6 +544,53 @@ class CourseDetailViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["has_completed_projects"])
         self.assertNotContains(response, "See all submitted projects")
+
+    def test_course_view_with_certificate(self):
+        """Test that the course view shows the certificate download button when a certificate is available"""
+        # Set a certificate URL for the enrollment
+        self.enrollment.certificate_url = "https://example.com/certificate.pdf"
+        self.enrollment.save()
+
+        self.client.login(**credentials)
+        response = self.client.get(
+            reverse("course", args=[self.course.slug])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "courses/course.html")
+        self.assertEqual(response.context["certificate_url"], "https://example.com/certificate.pdf")
+        self.assertContains(response, "Download Certificate")
+        self.assertContains(response, 'href="https://example.com/certificate.pdf"')
+
+    def test_course_view_without_certificate(self):
+        """Test that the course view doesn't show the certificate download button when no certificate is available"""
+        # Ensure no certificate URL is set
+        self.enrollment.certificate_url = None
+        self.enrollment.save()
+
+        self.client.login(**credentials)
+        response = self.client.get(
+            reverse("course", args=[self.course.slug])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "courses/course.html")
+        self.assertIsNone(response.context["certificate_url"])
+        self.assertNotContains(response, "Download Certificate")
+
+    def test_course_view_certificate_not_shown_when_not_authenticated(self):
+        """Test that the certificate button is not shown to unauthenticated users even if certificate exists"""
+        # Set a certificate URL for the enrollment
+        self.enrollment.certificate_url = "https://example.com/certificate.pdf"
+        self.enrollment.save()
+
+        # Don't login - access as unauthenticated user
+        response = self.client.get(
+            reverse("course", args=[self.course.slug])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "courses/course.html")
+        # certificate_url should be None for unauthenticated users
+        self.assertIsNone(response.context["certificate_url"])
+        self.assertNotContains(response, "Download Certificate")
 
     def test_list_all_submissions_view(self):
         """Test the list all submissions view shows submissions in correct order"""

@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.db.models import Sum, Count
 
 from django.db import transaction
+from django.core.cache import cache
 
 
 from .models import (
@@ -140,6 +141,11 @@ def is_answer_correct(question: Question, answer: Answer) -> bool:
 
 def update_learning_in_public_score(submission: Submission) -> int:
     learning_in_public_score = 0
+
+    # Check if learning in public is disabled for this enrollment
+    if submission.enrollment.disable_learning_in_public:
+        submission.learning_in_public_score = 0
+        return 0
 
     if submission.learning_in_public_links:
         learning_in_public_score = len(
@@ -339,6 +345,11 @@ def update_leaderboard(course: Course):
         enrollments,
         ["total_score", "position_on_leaderboard"],
     )
+
+    # Invalidate the leaderboard caches
+    cache.delete(f"leaderboard:{course.id}")
+    cache.delete(f"leaderboard_data:{course.id}")
+    logger.info(f"Invalidated cache for leaderboard of course {course.id}")
 
     t1 = time()
     logger.info(f"Updated leaderboard in {(t1 - t0):.2f} seconds")

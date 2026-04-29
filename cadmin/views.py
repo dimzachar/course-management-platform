@@ -19,12 +19,14 @@ from courses.models import (
     PeerReviewState,
     ReviewCriteria,
     ProjectEvaluationScore,
+    Enrollment,
 )
 from courses.scoring import (
     score_homework_submissions,
     fill_correct_answers,
     calculate_homework_statistics,
     calculate_project_statistics,
+    update_leaderboard,
 )
 from courses.projects import (
     assign_peer_reviews_for_project,
@@ -93,9 +95,11 @@ def course_admin(request, course_slug):
 @staff_required
 def homework_score(request, course_slug, homework_slug):
     """Score a homework"""
+    if request.method != "POST":
+        return redirect("cadmin_course", course_slug=course_slug)
     course = get_object_or_404(Course, slug=course_slug)
     homework = get_object_or_404(Homework, course=course, slug=homework_slug)
-    
+
     status, message = score_homework_submissions(homework.id)
     
     if status:
@@ -109,9 +113,11 @@ def homework_score(request, course_slug, homework_slug):
 @staff_required
 def homework_set_correct_answers(request, course_slug, homework_slug):
     """Set correct answers to most popular for a homework"""
+    if request.method != "POST":
+        return redirect("cadmin_course", course_slug=course_slug)
     course = get_object_or_404(Course, slug=course_slug)
     homework = get_object_or_404(Homework, course=course, slug=homework_slug)
-    
+
     fill_correct_answers(homework)
     
     messages.success(
@@ -174,11 +180,99 @@ def homework_submissions(request, course_slug, homework_slug):
 
 
 @staff_required
+def homework_submission_edit(request, course_slug, homework_slug, submission_id):
+    """Edit a homework submission"""
+    course = get_object_or_404(Course, slug=course_slug)
+    homework = get_object_or_404(Homework, course=course, slug=homework_slug)
+    submission = get_object_or_404(
+        Submission, 
+        id=submission_id, 
+        homework=homework
+    )
+    
+    # Get all questions for this homework
+    questions = Question.objects.filter(homework=homework).order_by("id")
+    
+    # Get all answers for this submission
+    answers = Answer.objects.filter(submission=submission).select_related("question")
+    answer_map = {answer.question_id: answer for answer in answers}
+    
+    # Build a list of questions with their current answers
+    questions_with_answers = []
+    for question in questions:
+        answer = answer_map.get(question.id)
+        questions_with_answers.append({
+            'question': question,
+            'answer': answer,
+            'answer_text': answer.answer_text if answer else "",
+        })
+    
+    if request.method == "POST":
+        # Store the old score to check if it changed
+        old_total_score = submission.total_score
+        
+        try:
+            # Update answers
+            for question in questions:
+                answer_text = request.POST.get(f"answer_{question.id}", "")
+                
+                # Get or create the answer
+                answer, created = Answer.objects.get_or_create(
+                    submission=submission,
+                    question=question,
+                    defaults={'answer_text': answer_text}
+                )
+                
+                if not created:
+                    answer.answer_text = answer_text
+                    answer.save()
+            
+            # Update learning in public links
+            lip_links_str = request.POST.get("learning_in_public_links", "")
+            if lip_links_str.strip():
+                # Parse the links (comma-separated)
+                links = [link.strip() for link in lip_links_str.split(",") if link.strip()]
+                submission.learning_in_public_links = links
+            else:
+                submission.learning_in_public_links = None
+            
+            # Recalculate the score
+            from courses.scoring import update_score
+            
+            # Get updated answers
+            updated_answers = list(Answer.objects.filter(submission=submission).select_related("question"))
+            update_score(submission, updated_answers, save=True)
+            
+            # If the score changed, update the leaderboard
+            if submission.total_score != old_total_score:
+                update_leaderboard(course)
+            
+            messages.success(
+                request,
+                f"Homework submission for {submission.student.username} updated successfully",
+            )
+            return redirect("cadmin_homework_submissions", course_slug=course_slug, homework_slug=homework_slug)
+        except Exception as e:
+            messages.error(request, f"Error updating submission: {e}")
+    
+    context = {
+        "course": course,
+        "homework": homework,
+        "submission": submission,
+        "questions_with_answers": questions_with_answers,
+    }
+    
+    return render(request, "cadmin/homework_submission_edit.html", context)
+
+
+@staff_required
 def project_assign_reviews(request, course_slug, project_slug):
     """Assign peer reviews for a project"""
+    if request.method != "POST":
+        return redirect("cadmin_course", course_slug=course_slug)
     course = get_object_or_404(Course, slug=course_slug)
     project = get_object_or_404(Project, course=course, slug=project_slug)
-    
+
     status, message = assign_peer_reviews_for_project(project)
     
     if status == ProjectActionStatus.OK:
@@ -192,9 +286,11 @@ def project_assign_reviews(request, course_slug, project_slug):
 @staff_required
 def project_score(request, course_slug, project_slug):
     """Score a project"""
+    if request.method != "POST":
+        return redirect("cadmin_course", course_slug=course_slug)
     course = get_object_or_404(Course, slug=course_slug)
     project = get_object_or_404(Project, course=course, slug=project_slug)
-    
+
     status, message = score_project(project)
     
     if status == ProjectActionStatus.OK:
@@ -345,4 +441,125 @@ def project_submission_edit(request, course_slug, project_slug, submission_id):
     }
 
     return render(request, "cadmin/project_submission_edit.html", context)
+
+
+@staff_required
+def enrollments_list(request, course_slug):
+    """List all enrollments for a course"""
+    from django.db.models import Count
+    
+    course = get_object_or_404(Course, slug=course_slug)
+    
+    # Get all enrollments with related student data and submission counts, ordered by leaderboard position
+    enrollments = Enrollment.objects.filter(course=course).select_related('student').annotate(
+        homework_count=Count('submission', distinct=True),
+        project_count=Count('projectsubmission', distinct=True)
+    ).order_by('position_on_leaderboard', 'id')
+    
+    context = {
+        "course": course,
+        "enrollments": enrollments,
+    }
+    
+    return render(request, "cadmin/enrollments.html", context)
+
+
+@staff_required
+def enrollment_edit(request, course_slug, enrollment_id):
+    """Edit an enrollment - mainly to disable learning in public"""
+    course = get_object_or_404(Course, slug=course_slug)
+    enrollment = get_object_or_404(Enrollment, id=enrollment_id, course=course)
+    
+    if request.method == "POST":
+        # Handle the disable learning in public toggle
+        action = request.POST.get("action")
+        
+        if action == "toggle_learning_in_public":
+            # Toggle the flag
+            enrollment.disable_learning_in_public = not enrollment.disable_learning_in_public
+            enrollment.save()
+            
+            # If we're disabling, zero out all learning in public scores
+            if enrollment.disable_learning_in_public:
+                # Zero out homework learning in public scores
+                homework_submissions = list(Submission.objects.filter(enrollment=enrollment))
+                submissions_to_update = []
+                for submission in homework_submissions:
+                    if submission.learning_in_public_score > 0:
+                        submission.learning_in_public_score = 0
+                        # Recalculate total score
+                        submission.total_score = (
+                            submission.questions_score + 
+                            submission.faq_score + 
+                            submission.learning_in_public_score
+                        )
+                        submissions_to_update.append(submission)
+                
+                if submissions_to_update:
+                    Submission.objects.bulk_update(
+                        submissions_to_update,
+                        ['learning_in_public_score', 'total_score']
+                    )
+                
+                # Zero out project learning in public scores
+                project_submissions = list(ProjectSubmission.objects.filter(enrollment=enrollment))
+                project_submissions_to_update = []
+                for submission in project_submissions:
+                    if submission.project_learning_in_public_score > 0 or submission.peer_review_learning_in_public_score > 0:
+                        submission.project_learning_in_public_score = 0
+                        submission.peer_review_learning_in_public_score = 0
+                        # Recalculate total score
+                        submission.total_score = (
+                            submission.project_score +
+                            submission.project_faq_score +
+                            submission.project_learning_in_public_score +
+                            submission.peer_review_score +
+                            submission.peer_review_learning_in_public_score
+                        )
+                        project_submissions_to_update.append(submission)
+                
+                if project_submissions_to_update:
+                    ProjectSubmission.objects.bulk_update(
+                        project_submissions_to_update,
+                        ['project_learning_in_public_score', 'peer_review_learning_in_public_score', 'total_score']
+                    )
+                
+                messages.success(
+                    request,
+                    f"Learning in public disabled for {enrollment.student.username}. All scores zeroed out."
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Learning in public re-enabled for {enrollment.student.username}. You may need to re-score homework and projects."
+                )
+            
+            # Recalculate the leaderboard for the course
+            update_leaderboard(course)
+            
+            return redirect("cadmin_enrollment_edit", course_slug=course_slug, enrollment_id=enrollment_id)
+    
+    # Get some stats about this enrollment
+    homework_submissions = Submission.objects.filter(enrollment=enrollment).select_related('homework').order_by('-submitted_at')
+    project_submissions = ProjectSubmission.objects.filter(enrollment=enrollment).select_related('project').order_by('-submitted_at')
+    
+    total_homework_lip_score = sum(s.learning_in_public_score for s in homework_submissions)
+    total_project_lip_score = sum(
+        s.project_learning_in_public_score + s.peer_review_learning_in_public_score 
+        for s in project_submissions
+    )
+    
+    context = {
+        "course": course,
+        "enrollment": enrollment,
+        "homework_submissions": homework_submissions,
+        "homework_submissions_count": homework_submissions.count(),
+        "project_submissions": project_submissions,
+        "project_submissions_count": project_submissions.count(),
+        "total_homework_lip_score": total_homework_lip_score,
+        "total_project_lip_score": total_project_lip_score,
+    }
+    
+    return render(request, "cadmin/enrollment_edit.html", context)
+
 
