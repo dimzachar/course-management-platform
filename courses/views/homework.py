@@ -190,6 +190,7 @@ def process_homework_submission(
     homework: Homework,
     questions: List[Question],
     submission: Optional[Submission],
+    is_draft: bool = False,
 ):
     user = request.user
 
@@ -261,11 +262,17 @@ def process_homework_submission(
     submission.full_clean()
     submission.save()
 
-    success_message = (
-        "Thank you for submitting your homework, now your solution "
-        + "is saved. You can update it at any point. You will see "
-        + "your score after the form is closed."
-    )
+    if is_draft:
+        success_message = (
+            "Your answers have been saved as a draft. "
+            + "Remember to submit before the deadline!"
+        )
+    else:
+        success_message = (
+            "Thank you for submitting your homework, now your solution "
+            + "is saved. You can update it at any point. You will see "
+            + "your score after the form is closed."
+        )
 
     messages.success(
         request,
@@ -380,12 +387,14 @@ def homework_view(
     # Process the form submission
     if request.method == "POST":
         try:
+            is_draft = request.POST.get("action") == "save_draft"
             return process_homework_submission(
                 request=request,
                 course=course,
                 homework=homework,
                 questions=questions,
                 submission=submission,
+                is_draft=is_draft,
             )
         except ValidationError as e:
             context["errors"] = e.messages

@@ -281,8 +281,18 @@
       <div class="mt-4 text-center">
         {% if is_authenticated %}
           <button
+              id="save-draft-button"
+              type="submit"
+              name="action"
+              value="save_draft"
+              class="btn btn-secondary me-2">
+            Save Draft
+          </button>
+          <button
               id="submit-button"
               type="submit"
+              name="action"
+              value="submit"
               class="btn btn-primary">
             {% if not submission %}
               Submit
